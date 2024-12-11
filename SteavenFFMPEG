@@ -1,0 +1,143 @@
+#!/bin/bash
+
+# steaven-ffmpeg: A helper script for ffmpeg encoding (AV1, H264, HEVC, CPU, NVIDIA)
+
+# Check if at least 3 arguments are provided
+if [[ $# -lt 3 ]]; then
+    echo "Usage: steaven-ffmpeg <av1_amf|h264_amf|hevc_amf|h264_nvenc|hevc_nvenc|libx264|libx265|libaom-av1|rav1e|av1_nvenc> <input_file> <output_file>"
+    exit 1
+fi
+
+# Encoder type
+ENCODER="$1"
+
+# Supported encoders
+SUPPORTED_ENCODERS=("av1_amf" "h264_amf" "hevc_amf" "h264_nvenc" "hevc_nvenc" "libx264" "libx265" "libaom-av1" "rav1e" "av1_nvenc")
+
+# Input file and output file
+INPUT_FILE="$2"
+OUTPUT_FILE="$3"
+
+# Validate encoder type
+if [[ ! " ${SUPPORTED_ENCODERS[@]} " =~ " ${ENCODER} " ]]; then
+    echo "Error: Unsupported encoder '${ENCODER}'."
+    echo "Supported encoders: ${SUPPORTED_ENCODERS[*]}"
+    exit 1
+fi
+
+# Check if the input file exists
+if [[ ! -f "$INPUT_FILE" ]]; then
+    echo "Error: Input file '$INPUT_FILE' does not exist."
+    exit 1
+fi
+
+# Function to retrieve overall bitrate in kbits/s
+get_bitrate() {
+    local file="$1"
+    local bitrate
+    bitrate=$(mediainfo "$file" | grep -i "Overall bit rate" | sed -E 's/[^0-9]+//g')
+    if [[ -z "$bitrate" ]]; then
+        bitrate=$(ffmpeg -i "$file" 2>&1 | grep -oP "bitrate:\s+\K[\d.]+(?=\s*kb/s)")
+    fi
+    echo "$bitrate"
+}
+
+# Function to retrieve maximum bitrate in kbits/s
+get_max_bitrate() {
+    local file="$1"
+    local max_bitrate
+    max_bitrate=$(mediainfo "$file" | grep -i "Maximum bit rate" | sed -E 's/[^0-9.]+//g')
+
+    # Check if max_bitrate is found in Mb/s and convert to kbit/s
+    if [[ "$max_bitrate" =~ ^[0-9.]+$ ]]; then
+        # If it's in Mb/s, convert it to kbit/s
+        if [[ "$max_bitrate" =~ "M" ]]; then
+            echo "$(echo "$max_bitrate * 1000" | bc)k"
+        else
+            # If it's in Mb, convert it to kbit and round the number
+            rounded_bitrate=$(echo "$max_bitrate" | awk '{print int($1)}')
+            echo "$((rounded_bitrate * 1000))k"
+        fi
+    else
+        # Default to 2x overall bitrate if max bitrate is not found
+        local overall_bitrate
+        overall_bitrate=$(get_bitrate "$file")
+        echo "$((overall_bitrate * 2))k"
+    fi
+}
+
+# Retrieve bitrates
+BITRATE=$(get_bitrate "$INPUT_FILE")
+MAX_BITRATE=$(get_max_bitrate "$INPUT_FILE")
+
+# Validate overall bitrate
+if [[ -z "$BITRATE" ]]; then
+    echo "Error: Failed to retrieve overall bitrate."
+    exit 1
+fi
+
+# Determine audio codec based on encoder
+if [[ "$ENCODER" == "av1_amf" || "$ENCODER" == "av1_nvenc" || "$ENCODER" == "libaom-av1" || "$ENCODER" == "rav1e" ]]; then
+    AUDIO_CODEC="libopus"
+elif [[ "$ENCODER" == "h264_amf" || "$ENCODER" == "hevc_amf" || "$ENCODER" == "h264_nvenc" || "$ENCODER" == "hevc_nvenc" || "$ENCODER" == "libx264" || "$ENCODER" == "libx265" ]]; then
+    AUDIO_CODEC="aac"
+else
+    echo "Error: Unsupported encoder '${ENCODER}'."
+    exit 1
+fi
+
+# Prepare ffmpeg command based on selected encoder
+FFMPEG_CMD=("ffmpeg" -i "$INPUT_FILE" -c:a "$AUDIO_CODEC")
+
+# Check for NVIDIA support and set the video codec accordingly
+if [[ "$ENCODER" == "h264_nvenc" || "$ENCODER" == "hevc_nvenc" || "$ENCODER" == "av1_nvenc" ]]; then
+    FFMPEG_CMD+=(-c:v "$ENCODER")
+elif [[ "$ENCODER" == "libx264" || "$ENCODER" == "libx265" ]]; then
+    # Use CPU-based encoding
+    if [[ "$ENCODER" == "libx264" ]]; then
+        FFMPEG_CMD+=(-c:v libx264)
+    elif [[ "$ENCODER" == "libx265" ]]; then
+        FFMPEG_CMD+=(-c:v libx265)
+    fi
+elif [[ "$ENCODER" == "libaom-av1" || "$ENCODER" == "rav1e" ]]; then
+    # Use CPU-based AV1 encoding
+    if [[ "$ENCODER" == "libaom-av1" ]]; then
+        FFMPEG_CMD+=(-c:v libaom-av1)
+    elif [[ "$ENCODER" == "rav1e" ]]; then
+        FFMPEG_CMD+=(-c:v rav1e)
+    fi
+elif [[ "$ENCODER" == "av1_amf" || "$ENCODER" == "hevc_amf" || "$ENCODER" == "h264_amf" ]]; then
+    # Use AMD AMF encoding
+    FFMPEG_CMD+=(-c:v "$ENCODER")
+else
+    echo "Error: Unsupported encoder '${ENCODER}'."
+    exit 1
+fi
+
+# Set bitrate options
+FFMPEG_CMD+=(-b:v "${BITRATE}k" -pix_fmt yuv420p)
+
+# Add maxrate if available and in the correct format (kbits)
+if [[ -n "$MAX_BITRATE" ]]; then
+    FFMPEG_CMD+=(-maxrate "$MAX_BITRATE")
+else
+    echo "Warning: Maximum bitrate not found. Skipping -maxrate option."
+fi
+
+# Add output file (last argument, after all options)
+FFMPEG_CMD+=("$OUTPUT_FILE")
+
+# Output the ffmpeg command
+echo "The following ffmpeg command will be run:"
+echo "${FFMPEG_CMD[@]}"
+
+# Execute ffmpeg command
+"${FFMPEG_CMD[@]}"
+
+# Check if ffmpeg succeeded
+if [[ $? -eq 0 ]]; then
+    echo "Encoding successful: $OUTPUT_FILE"
+else
+    echo "Error: Encoding failed."
+    exit 1
+fi
