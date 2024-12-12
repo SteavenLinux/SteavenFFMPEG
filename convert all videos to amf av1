@@ -1,0 +1,12 @@
+#!/bin/bash
+mkdir -p av1_vbr  # Create output folder if it doesn't exist
+
+# Loop through all MP4 files
+for file in *.mp4; do
+    output="av1_vbr/${file%}.mp4"  # Set output file name
+    echo "Processing: $file"
+    steaven-ffmpeg av1_amf "$file" "$output"
+    echo "Output: $output"
+done
+
+echo "All files processed."
